@@ -1,0 +1,21 @@
+rness/mozilla/testing/testbase.py
+--- a/mozharness/mozilla/testing/testbase.py	Fri Dec 12 11:22:54 2014 -0800
++++ b/mozharness/mozilla/testing/testbase.py	Sat Dec 13 13:02:08 2014 -0500
+@@ -195,6 +195,7 @@
+                 Release Engineering network
+         """
+         c = self.config
++        orig_config = copy.deepcopy(c)
+         self.warning("When you use developer_config.py, we drop " \
+                 "'read-buildbot-config' from the list of actions.")
+         if "read-buildbot-config" in rw_config.actions:
+@@ -221,7 +222,8 @@
+             if type(value) == str and value.startswith("http"):
+                 self.config[key] = _replace_url(value, c["replace_urls"])
+ 
+-        self._get_credentials()
++        if not c == orig_config:
++            self._get_credentials()
+ 
+     def _urlopen(self, url, **kwargs):
+         '''
