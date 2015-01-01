@@ -1,0 +1,232 @@
+# HG changeset patch
+# User Anurag Chaudhury (anuragchaudhury@gmail.com)
+# Parent  6530bfc2636ea7b4d14d4f454c38a00edd243509
+Bug 1097150 - Added getAllUsedFontFaces to styles.js retrieve fonts from all windows;r=pbrosset
+
+diff --git a/browser/devtools/fontinspector/font-inspector.js b/browser/devtools/fontinspector/font-inspector.js
+--- a/browser/devtools/fontinspector/font-inspector.js
++++ b/browser/devtools/fontinspector/font-inspector.js
+@@ -80,17 +80,17 @@ FontInspector.prototype = {
+    */
+   undim: function FI_undim() {
+     this.chromeDoc.body.classList.remove("dim");
+   },
+ 
+  /**
+   * Retrieve all the font info for the selected node and display it.
+   */
+-  update: Task.async(function*() {
++  update: Task.async(function*(showAllFonts) {
+     let node = this.inspector.selection.nodeFront;
+ 
+     if (!node ||
+         !this.isActive() ||
+         !this.inspector.selection.isConnected() ||
+         !this.inspector.selection.isElementNode() ||
+         this.chromeDoc.body.classList.contains("dim")) {
+       return;
+@@ -99,20 +99,26 @@ FontInspector.prototype = {
+     this.chromeDoc.querySelector("#all-fonts").innerHTML = "";
+ 
+     let fillStyle = (Services.prefs.getCharPref("devtools.theme") == "light") ?
+         "black" : "white";
+     let options = {
+       includePreviews: true,
+       previewFillStyle: fillStyle
+     }
+-
+-    let fonts = yield this.pageStyle.getUsedFontFaces(node, options)
++    let fonts = [];
++    if (showAllFonts){
++      fonts = yield this.pageStyle.getAllUsedFontFaces(options)
+                       .then(null, console.error);
+-    if (!fonts) {
++    }
++    else{
++      fonts = yield this.pageStyle.getUsedFontFaces(node, options)
++                      .then(null, console.error);
++    }
++    if (!fonts || !fonts.length) {
+       return;
+     }
+ 
+     for (let font of fonts) {
+       font.previewUrl = yield font.preview.data.string();
+     }
+ 
+     // in case we've been destroyed in the meantime
+@@ -164,31 +170,20 @@ FontInspector.prototype = {
+     }
+     let preview = s.querySelector(".font-preview");
+     preview.src = font.previewUrl;
+ 
+     this.chromeDoc.querySelector("#all-fonts").appendChild(s);
+   },
+ 
+   /**
+-   * Select the <body> to show all the fonts included in the document.
++   * Show all fonts for the document (including iframes)
+    */
+   showAll: function FI_showAll() {
+-    if (!this.isActive() ||
+-        !this.inspector.selection.isConnected() ||
+-        !this.inspector.selection.isElementNode()) {
+-      return;
+-    }
+-
+-    // Select the body node to show all fonts
+-    let walker = this.inspector.walker;
+-
+-    walker.getRootNode().then(root => walker.querySelector(root, "body")).then(body => {
+-      this.inspector.selection.setNodeFront(body, "fontinspector");
+-    });
++    this.update(true);
+   },
+ }
+ 
+ window.setPanel = function(panel) {
+   window.fontInspector = new FontInspector(panel, window);
+ }
+ 
+ window.onunload = function() {
+diff --git a/browser/devtools/fontinspector/test/browser.ini b/browser/devtools/fontinspector/test/browser.ini
+--- a/browser/devtools/fontinspector/test/browser.ini
++++ b/browser/devtools/fontinspector/test/browser.ini
+@@ -1,9 +1,10 @@
+ [DEFAULT]
+ subsuite = devtools
+ support-files =
+   browser_fontinspector.html
++  test_iframe.html
+   ostrich-black.ttf
+   ostrich-regular.ttf
+   head.js
+ 
+ [browser_fontinspector.js]
+diff --git a/browser/devtools/fontinspector/test/browser_fontinspector.html b/browser/devtools/fontinspector/test/browser_fontinspector.html
+--- a/browser/devtools/fontinspector/test/browser_fontinspector.html
++++ b/browser/devtools/fontinspector/test/browser_fontinspector.html
+@@ -40,12 +40,13 @@
+     font-family: bar;
+     font-weight: 800;
+   }
+ </style>
+ 
+ <body>
+   BODY
+   <div>DIV</div>
++  <iframe src="test_iframe.html"></iframe>
+   <div class="normal-text">NORMAL DIV</div>
+   <div class="bold-text">BOLD DIV</div>
+   <div class="black-text">800 DIV</div>
+ </body>
+diff --git a/browser/devtools/fontinspector/test/browser_fontinspector.js b/browser/devtools/fontinspector/test/browser_fontinspector.js
+--- a/browser/devtools/fontinspector/test/browser_fontinspector.js
++++ b/browser/devtools/fontinspector/test/browser_fontinspector.js
+@@ -102,12 +102,13 @@ function* testDivFonts(inspector) {
+ 
+ function* testShowAllFonts(inspector) {
+   info("testing showing all fonts");
+ 
+   let updated = inspector.once("fontinspector-updated");
+   viewDoc.querySelector("#showall").click();
+   yield updated;
+ 
+-  is(inspector.selection.nodeFront.nodeName, "BODY", "Show all fonts selected the body node");
++  // shouldn't change the node selection
++  is(inspector.selection.nodeFront.nodeName, "DIV", "Show all fonts selected");
+   let sections = viewDoc.querySelectorAll("#all-fonts > section");
+-  is(sections.length, 5, "And font-inspector still shows 5 fonts for body");
++  is(sections.length, 6, "Font inspector shows 6 fonts (1 from iframe)");
+ }
+diff --git a/browser/devtools/fontinspector/test/test_iframe.html b/browser/devtools/fontinspector/test/test_iframe.html
+new file mode 100644
+--- /dev/null
++++ b/browser/devtools/fontinspector/test/test_iframe.html
+@@ -0,0 +1,11 @@
++<!DOCTYPE html>
++
++<style>
++  div{
++    font-family: "Times New Roman";
++  }
++</style>
++
++<body>
++  <div>Hello world</div>
++</body>
+diff --git a/toolkit/devtools/server/actors/styles.js b/toolkit/devtools/server/actors/styles.js
+--- a/toolkit/devtools/server/actors/styles.js
++++ b/toolkit/devtools/server/actors/styles.js
+@@ -234,34 +234,67 @@ var PageStyleActor = protocol.ActorClass
+       filter: Option(1, "string"),
+     },
+     response: {
+       computed: RetVal("json")
+     }
+   }),
+ 
+   /**
++   * Get all the fonts from a page.
++   *
++   * @param object options
++   *   `includePreviews`: Whether to also return image previews of the fonts.
++   *   `previewText`: The text to display in the previews.
++   *   `previewFontSize`: The font size of the text in the previews.
++   *
++   * @returns object
++   *   object with 'fontFaces', a list of fonts that apply to this node.
++   */
++  getAllUsedFontFaces: method(function(options) {
++    let windows = this.inspector.tabActor.windows;
++    let fontsList = [];
++    for(let win of windows){
++      fontsList = [...fontsList,
++                   ...this.getUsedFontFaces(win.document.body, options)];
++    }
++    return fontsList;
++  },
++  {
++    request: {
++      includePreviews: Option(0, "boolean"),
++      previewText: Option(0, "string"),
++      previewFontSize: Option(0, "string"),
++      previewFillStyle: Option(0, "string")
++    },
++    response: {
++      fontFaces: RetVal("array:fontface")
++    }
++  }),
++
++  /**
+    * Get the font faces used in an element.
+    *
+-   * @param NodeActor node
++   * @param NodeActor node / actual DOM node
+    *    The node to get fonts from.
+    * @param object options
+    *   `includePreviews`: Whether to also return image previews of the fonts.
+    *   `previewText`: The text to display in the previews.
+    *   `previewFontSize`: The font size of the text in the previews.
+    *
+    * @returns object
+    *   object with 'fontFaces', a list of fonts that apply to this node.
+    */
+   getUsedFontFaces: method(function(node, options) {
+-    let contentDocument = node.rawNode.ownerDocument;
+-
++    // node.rawNode is defined for NodeActor objects
++    let actualNode = node.rawNode || node;
++    let contentDocument = actualNode.ownerDocument;
+     // We don't get fonts for a node, but for a range
+     let rng = contentDocument.createRange();
+-    rng.selectNodeContents(node.rawNode);
++    rng.selectNodeContents(actualNode);
+     let fonts = DOMUtils.getUsedFontFaces(rng);
+     let fontsArray = [];
+ 
+     for (let i = 0; i < fonts.length; i++) {
+       let font = fonts.item(i);
+       let fontFace = {
+         name: font.name,
+         CSSFamilyName: font.CSSFamilyName,
